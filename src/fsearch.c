@@ -26,8 +26,14 @@
 #include "fsearch_clipboard.h"
 #include "fsearch_config.h"
 #include "fsearch_database.h"
+#include "fsearch_database_exclude.h"
+#include "fsearch_database_exclude_manager.h"
+#include "fsearch_database_include.h"
+#include "fsearch_database_include_manager.h"
 #include "fsearch_database_info.h"
+#include "fsearch_exclude_path.h"
 #include "fsearch_file_utils.h"
+#include "fsearch_index.h"
 #include "fsearch_limits.h"
 #include "fsearch_preferences_dialog.h"
 #include "fsearch_ui_utils.h"
@@ -242,6 +248,37 @@ on_preferences_dialog_response(GtkDialog *dialog, gint response_id, gpointer use
             g_clear_pointer(&self->config, config_free);
         }
         self->config = new_config;
+
+        if (self->config->indexes) {
+            g_list_free_full(g_steal_pointer(&self->config->indexes), (GDestroyNotify)fsearch_index_free);
+        }
+        g_autoptr(GPtrArray) includes = fsearch_database_include_manager_get_includes(include_manager);
+        for (uint32_t i = 0; i < includes->len; ++i) {
+            FsearchDatabaseInclude *include = g_ptr_array_index(includes, i);
+            FsearchIndex *index = fsearch_index_new(FSEARCH_INDEX_FOLDER_TYPE,
+                                                    fsearch_database_include_get_path(include),
+                                                    fsearch_database_include_get_active(include),
+                                                    true,
+                                                    fsearch_database_include_get_one_file_system(include),
+                                                    fsearch_database_include_get_monitored(include),
+                                                    fsearch_database_include_get_id(include),
+                                                    0);
+            self->config->indexes = g_list_append(self->config->indexes, index);
+        }
+
+        if (self->config->exclude_locations) {
+            g_list_free_full(g_steal_pointer(&self->config->exclude_locations),
+                           (GDestroyNotify)fsearch_exclude_path_free);
+        }
+        g_autoptr(GPtrArray) excludes = fsearch_database_exclude_manager_get_excludes(exclude_manager);
+        for (uint32_t i = 0; i < excludes->len; ++i) {
+            FsearchDatabaseExclude *exclude = g_ptr_array_index(excludes, i);
+            FsearchExcludePath *exclude_path =
+                fsearch_exclude_path_new(fsearch_database_exclude_get_path(exclude),
+                                        fsearch_database_exclude_get_active(exclude));
+            self->config->exclude_locations = g_list_append(self->config->exclude_locations, exclude_path);
+        }
+
         config_save(self->config);
 
         g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", new_config->enable_dark_theme, NULL);
@@ -402,6 +439,55 @@ set_accels_for_escape(GApplication *app) {
 }
 
 static void
+database_init_from_config(FsearchApplication *self) {
+    g_assert(FSEARCH_IS_APPLICATION(self));
+    g_assert(self->config);
+
+    g_autoptr(FsearchDatabaseIncludeManager) include_manager = fsearch_database_include_manager_new();
+    if (self->config->indexes) {
+        for (GList *l = self->config->indexes; l != NULL; l = l->next) {
+            FsearchIndex *index = l->data;
+            if (!index) {
+                continue;
+            }
+            FsearchDatabaseInclude *include = fsearch_database_include_new(index->path,
+                                                                           index->enabled,
+                                                                           index->one_filesystem,
+                                                                           index->monitor,
+                                                                           false,
+                                                                           index->id);
+            fsearch_database_include_manager_add(include_manager, include);
+            g_clear_pointer(&include, fsearch_database_include_unref);
+        }
+    }
+
+    g_autoptr(FsearchDatabaseExcludeManager) exclude_manager = fsearch_database_exclude_manager_new();
+    if (self->config->exclude_locations) {
+        for (GList *l = self->config->exclude_locations; l != NULL; l = l->next) {
+            FsearchExcludePath *exclude_path = l->data;
+            if (!exclude_path) {
+                continue;
+            }
+            FsearchDatabaseExclude *exclude = fsearch_database_exclude_new(exclude_path->path, exclude_path->enabled);
+            fsearch_database_exclude_manager_add(exclude_manager, exclude);
+            g_clear_pointer(&exclude, fsearch_database_exclude_unref);
+        }
+    }
+
+    if (self->work_scan) {
+        fsearch_database_work_cancel(self->work_scan);
+        g_clear_pointer(&self->work_scan, fsearch_database_work_unref);
+    }
+    self->work_scan = fsearch_database_work_new_scan(include_manager,
+                                                     exclude_manager,
+                                                     DATABASE_INDEX_PROPERTY_FLAG_NAME
+                                                         | DATABASE_INDEX_PROPERTY_FLAG_PATH
+                                                         | DATABASE_INDEX_PROPERTY_FLAG_SIZE
+                                                         | DATABASE_INDEX_PROPERTY_FLAG_MODIFICATION_TIME);
+    fsearch_database_queue_work(self->db, self->work_scan);
+}
+
+static void
 on_database_scan_started(FsearchDatabase *db, gpointer user_data) {
     FsearchApplication *self = (FsearchApplication *)user_data;
     g_assert(FSEARCH_IS_APPLICATION(self));
@@ -427,6 +513,9 @@ on_database_update_finished(FsearchDatabase *db, FsearchDatabaseInfo *info, gpoi
 static void
 fsearch_application_startup(GApplication *app) {
     g_assert(FSEARCH_IS_APPLICATION(app));
+
+    g_log_set_debug_enabled(TRUE);
+
     G_APPLICATION_CLASS(fsearch_application_parent_class)->startup(app);
 
     FsearchApplication *self = FSEARCH_APPLICATION(app);
@@ -439,6 +528,7 @@ fsearch_application_startup(GApplication *app) {
 
     self->config = calloc(1, sizeof(FsearchConfig));
     g_assert(self->config);
+    g_debug("config struct at %p", self->config);
     if (!config_load(self->config)) {
         config_load_default(self->config);
     }
@@ -532,8 +622,7 @@ fsearch_application_activate(GApplication *app) {
     database_auto_update_init(self);
 
     if (self->config->update_database_on_launch) {
-        // TODO: implement
-        // database_scan_or_load_enqueue(FSEARCH_DATABASE_ACTION_SCAN);
+        database_init_from_config(self);
     }
 }
 
@@ -705,10 +794,12 @@ fsearch_application_local_database_scan() {
 
     if (worker_ctx.update_called_on_primary) {
         // triggered update in primary instance, we're done here
+        g_debug("[app] database update triggered in primary instance");
         return 0;
     }
     else {
         // no primary instance found, perform update
+        g_debug("[app] no primary instance found, performing database update locally");
         return database_scan_in_local_instance();
     }
 }

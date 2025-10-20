@@ -415,14 +415,18 @@ init_include_page(FsearchDatabasePreferencesWidget *self) {
 
 static void
 populate_include_page(FsearchDatabasePreferencesWidget *self) {
+    g_debug("populate include page");
     FsearchDatabaseIncludeManager *include_manager = fsearch_database_info_get_include_manager(self->info);
     if (!include_manager) {
         return;
     }
+    g_debug("got include manager");
     g_autoptr(GPtrArray) includes = fsearch_database_include_manager_get_includes(include_manager);
     if (!includes || includes->len == 0) {
         return;
     }
+
+    g_debug("got %u includes", includes->len);
 
     for (uint32_t i = 0; i < includes->len; ++i) {
         FsearchDatabaseInclude *include = g_ptr_array_index(includes, i);
@@ -494,8 +498,10 @@ fsearch_database_preferences_widget_dispose(GObject *object) {
 static void
 fsearch_database_preferences_widget_constructed(GObject *object) {
     FsearchDatabasePreferencesWidget *self = FSEARCH_DATABASE_PREFERENCES_WIDGET(object);
+    g_debug("fsearch database preferences widget constructed");
 
     if (fsearch_database_try_get_database_info(self->db, &self->info) == FSEARCH_RESULT_SUCCESS) {
+        g_debug("got database info");
         populate_include_page(self);
         populate_exclude_page(self);
     }

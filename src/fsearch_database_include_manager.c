@@ -41,7 +41,6 @@ fsearch_database_include_manager_new_with_defaults() {
     return fsearch_database_include_manager_new();
 }
 
-
 void
 fsearch_database_include_manager_add(FsearchDatabaseIncludeManager *self, FsearchDatabaseInclude *include) {
     g_return_if_fail(self);
@@ -98,3 +97,5 @@ fsearch_database_include_manager_copy(FsearchDatabaseIncludeManager *self) {
 
     return copy;
 }
+
+// FsearchConfig *config = fsearch_application_get_config(FSEARCH_APPLICATION_DEFAULT);

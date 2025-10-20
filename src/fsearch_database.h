@@ -13,6 +13,8 @@
 G_BEGIN_DECLS
 
 #define FSEARCH_TYPE_DATABASE fsearch_database_get_type()
+// Expose the include manager type for property support
+#define FSEARCH_TYPE_DATABASE_INCLUDE_MANAGER fsearch_database_include_manager_get_type()
 G_DECLARE_FINAL_TYPE(FsearchDatabase, fsearch_database, FSEARCH, DATABASE, GObject)
 
 typedef void (*FsearchDatabaseForeachFunc)(FsearchDatabaseEntry *entry, gpointer user_data);
@@ -41,5 +43,12 @@ fsearch_database_try_get_item_info(FsearchDatabase *self,
 
 FsearchDatabase *
 fsearch_database_new(GFile *file);
+
+// Getter for the include manager
+FsearchDatabaseIncludeManager *
+fsearch_database_get_include_manager(FsearchDatabase *self);
+
+// issue seems to be that there is no include
+// or exclude managers here
 
 G_END_DECLS

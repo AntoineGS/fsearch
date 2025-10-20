@@ -1,3 +1,4 @@
+#define G_LOG_DOMAIN "fsearch-database-info"
 #include "fsearch_database_info.h"
 
 struct _FsearchDatabaseInfo {
@@ -75,7 +76,9 @@ fsearch_database_info_get_num_entries(FsearchDatabaseInfo *self) {
 
 FsearchDatabaseIncludeManager *
 fsearch_database_info_get_include_manager(FsearchDatabaseInfo *self) {
+    g_debug("getting include manager");
     g_return_val_if_fail(self, NULL);
+    g_debug("got include manager");
     return self->include_manager ? g_object_ref(self->include_manager) : NULL;
 }
 

@@ -28,7 +28,7 @@ test_query(QueryTest *t) {
         g_auto(GStrv) names = g_strsplit(haystack, "/", -1);
         const guint names_len = g_strv_length(names);
 
-        entry = db_entry_new(flags, "1", NULL, DATABASE_ENTRY_TYPE_FOLDER);
+        entry = db_entry_new(flags, "", NULL, DATABASE_ENTRY_TYPE_FOLDER);
 
         if (names_len > 0) {
             for (int i = 0; i < names_len - 1; i++) {
@@ -250,6 +250,128 @@ test_main(void) {
 
             {"parent:/b/a", "/a/b/c", false, 0, 0, false},
             {"parent:/a/b", "/a/b/c", false, 0, 0, true},
+            {"parent:/a", "/a/b", false, 0, 0, true},
+            {"parent:/", "/a", false, 0, 0, true},
+            {"parent:/a/b/c", "/a/b/c/d", false, 0, 0, true},
+
+            // depth edge cases
+            {"depth:1", "/a", false, 0, 0, true},
+            {"depth:0", "/a", false, 0, 0, false},
+            {"depth:4", "/a/b/c/d", false, 0, 0, true},
+            {"depth:<3", "/a/b", false, 0, 0, true},
+            {"depth:<3", "/a/b/c", false, 0, 0, false},
+            {"depth:>2", "/a/b/c", false, 0, 0, true},
+            {"depth:>2", "/a/b", false, 0, 0, false},
+            {"depth:2..4", "/a/b/c", false, 0, 0, true},
+            {"depth:2..4", "/a", false, 0, 0, false},
+            {"depth:2..4", "/a/b/c/d/e", false, 0, 0, false},
+
+            // path with wildcards
+            {"path:*a*", "/foo/bar/baz", false, 0, 0, true},
+            {"path:*/foo/*", "/dir/foo/bar", false, 0, 0, true},
+            {"path:*/foo/*", "/dir/bar/baz", false, 0, 0, false},
+
+            // combined path and name searches
+            {"path:home name.txt", "/home/user/name.txt", false, 0, 0, true},
+            {"path:home name.txt", "/var/log/name.txt", false, 0, 0, false},
+            {"path:/usr lib", "/usr/local/lib", false, 0, 0, true},
+
+            // folder type matching
+            {"folder:", "testdir", true, 0, 0, true},
+            {"folder:", "testfile", false, 0, 0, false},
+            {"folder:test", "testdir", true, 0, 0, true},
+            {"folder:test", "testfile", false, 0, 0, false},
+            {"!folder:", "testfile", false, 0, 0, true},
+            {"!folder:", "testdir", true, 0, 0, false},
+
+            // file type matching
+            {"file:", "testfile", false, 0, 0, true},
+            {"file:", "testdir", true, 0, 0, false},
+            {"file:doc", "document.txt", false, 0, 0, true},
+            {"file:doc", "docdir", true, 0, 0, false},
+
+            // size edge cases
+            {"size:0", "empty", false, 0, 0, true},
+            {"size:0", "nonempty", false, 1, 0, false},
+            {"size:<100", "small", false, 99, 0, true},
+            {"size:<100", "large", false, 100, 0, false},
+            {"size:<=100", "exact", false, 100, 0, true},
+            {"size:1..100", "mid", false, 50, 0, true},
+            {"size:1..100", "zero", false, 0, 0, false},
+            {"size:1..100", "toobig", false, 101, 0, false},
+            {"size:1KB..1MB", "medium", false, 500000, 0, true},
+            {"size:>1GB", "huge", false, 2000000000, 0, true},
+
+            // empty and whitespace queries
+            {"", "anything", false, 0, 0, true},
+            {"   ", "anything", false, 0, 0, true},
+
+            // special characters in names
+            {"test-file", "test-file.txt", false, 0, 0, true},
+            {"test_file", "test_file.txt", false, 0, 0, true},
+            {"test.old", "test.old.bak", false, 0, 0, true},
+
+            // multiple extensions
+            {"ext:txt;md;rst", "readme.txt", false, 0, 0, true},
+            {"ext:txt;md;rst", "readme.md", false, 0, 0, true},
+            {"ext:txt;md;rst", "readme.rst", false, 0, 0, true},
+            {"ext:txt;md;rst", "readme.pdf", false, 0, 0, false},
+            {"ext:gz", "archive.tar.gz", false, 0, 0, true},
+            {"ext:tar", "archive.tar.gz", false, 0, 0, false},
+
+            // case sensitivity edge cases
+            {"exact:test", "TEST", false, 0, 0, true},
+            {"exact:test", "Test", false, 0, 0, true},
+            {"exact:test", "test", false, 0, 0, true},
+            {"exact:test", "testing", false, 0, 0, false},
+            {"case:exact:test", "TEST", false, 0, 0, false},
+            {"case:exact:test", "test", false, 0, 0, true},
+
+            // regex edge cases
+            {"regex:^test$", "test", false, 0, 0, true},
+            {"regex:^test$", "test.txt", false, 0, 0, false},
+            {"regex:^test$", "mytest", false, 0, 0, false},
+            {"regex:[0-9]+", "file123", false, 0, 0, true},
+            {"regex:[0-9]+", "filename", false, 0, 0, false},
+            {"regex:test|demo", "testfile", false, 0, 0, true},
+            {"regex:test|demo", "demofile", false, 0, 0, true},
+            {"regex:test|demo", "prodfile", false, 0, 0, false},
+
+            // complex boolean combinations
+            {"a && b && c && d", "abcd", false, 0, 0, true},
+            {"a && b && c && d", "abc", false, 0, 0, false},
+            {"a || b || c || d", "a", false, 0, 0, true},
+            {"a || b || c || d", "e", false, 0, 0, false},
+            {"(a || b) && (c || d)", "ac", false, 0, 0, true},
+            {"(a || b) && (c || d)", "bd", false, 0, 0, true},
+            {"(a || b) && (c || d)", "ab", false, 0, 0, false},
+            {"(a || b) && (c || d)", "cd", false, 0, 0, false},
+            {"a && !b && c", "ac", false, 0, 0, true},
+            {"a && !b && c", "abc", false, 0, 0, false},
+            {"!(a || b) && c", "c", false, 0, 0, true},
+            {"!(a || b) && c", "ac", false, 0, 0, false},
+            {"!(a || b) && c", "bc", false, 0, 0, false},
+
+            // path depth combinations
+            {"path:a depth:2", "/a/b", false, 0, 0, true},
+            {"path:a depth:2", "/a/b/c", false, 0, 0, false},
+            {"path:a depth:3", "/a/b/c", false, 0, 0, true},
+
+            // size with other filters
+            {"size:>100 ext:txt", "large.txt", false, 200, 0, true},
+            {"size:>100 ext:txt", "large.pdf", false, 200, 0, false},
+            {"size:>100 ext:txt", "small.txt", false, 50, 0, false},
+            {"folder: size:0", "emptydir", true, 0, 0, true},
+            {"file: size:0", "emptyfile", false, 0, 0, true},
+
+            // parent with name matching
+            {"parent:/home test", "/home/user/test.txt", false, 0, 0, false},
+            {"parent:/home/user test", "/home/user/test.txt", false, 0, 0, true},
+
+            // deeply nested paths
+            {"depth:10", "/1/2/3/4/5/6/7/8/9/10", false, 0, 0, true},
+            {"parent:/1/2/3/4/5", "/1/2/3/4/5/6", false, 0, 0, true},
+            {"path:/1/2/3/4/5/6/7/8/9/10", "/1/2/3/4/5/6/7/8/9/10", false, 0, 0, true},
 
             // macros
             {"test || (pic: video:)", "test.jpg", false, 0, 0, true},

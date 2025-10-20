@@ -167,10 +167,13 @@ config_load_indexes(GKeyFile *key_file, GList *indexes, const char *prefix) {
         bool update = config_load_boolean(key_file, "Database", key, true);
         snprintf(key, sizeof(key), "%s_one_filesystem_%d", prefix, pos);
         bool one_filesystem = config_load_boolean(key_file, "Database", key, false);
+        snprintf(key, sizeof(key), "%s_monitor_%d", prefix, pos);
+        bool monitor = config_load_boolean(key_file, "Database", key, false);
 
         pos++;
         if (path) {
-            FsearchIndex *index = fsearch_index_new(FSEARCH_INDEX_FOLDER_TYPE, path, enabled, update, one_filesystem, 0);
+            FsearchIndex *index =
+                fsearch_index_new(FSEARCH_INDEX_FOLDER_TYPE, path, enabled, update, one_filesystem, monitor, 0, 0);
             indexes = g_list_append(indexes, index);
         }
         else {
@@ -204,6 +207,7 @@ config_load_exclude_locations(GKeyFile *key_file, GList *locations, const char *
 
 bool
 config_load(FsearchConfig *config) {
+    g_debug("config_load()");
     g_assert(config != NULL);
 
     bool result = false;
@@ -481,6 +485,11 @@ config_save_indexes(GKeyFile *key_file, GList *indexes, const char *prefix) {
 
         snprintf(key, sizeof(key), "%s_one_filesystem_%d", prefix, pos);
         g_key_file_set_boolean(key_file, "Database", key, index->one_filesystem);
+
+        snprintf(key, sizeof(key), "%s_monitor_%d", prefix, pos);
+        g_key_file_set_boolean(key_file, "Database", key, index->monitor);
+
+        // TODO: add last_updated
 
         pos++;
     }

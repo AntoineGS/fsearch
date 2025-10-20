@@ -10,7 +10,9 @@
 #include <glib/gi18n.h>
 #include <sys/file.h>
 
+#include "fsearch.h"
 #include "fsearch_array.h"
+#include "fsearch_config.h"
 #include "fsearch_database_entries_container.h"
 #include "fsearch_database_entry.h"
 #include "fsearch_database_entry_info.h"
@@ -21,6 +23,7 @@
 #include "fsearch_database_sort.h"
 #include "fsearch_database_work.h"
 #include "fsearch_enums.h"
+#include "fsearch_index.h"
 #include "fsearch_selection.h"
 #include "fsearch_thread_pool.h"
 
@@ -92,7 +95,7 @@ struct _FsearchDatabase {
 
 G_DEFINE_TYPE(FsearchDatabase, fsearch_database, G_TYPE_OBJECT)
 
-enum { PROP_0, PROP_FILE, NUM_PROPERTIES };
+enum { PROP_0, PROP_FILE, PROP_INCLUDE_MANAGER, NUM_PROPERTIES };
 static GParamSpec *properties[NUM_PROPERTIES];
 
 typedef enum FsearchDatabaseSignalType {
@@ -987,6 +990,9 @@ database_file_load_folders(FILE *fp,
                            uint64_t folder_block_size) {
     g_autoptr(GString) previous_entry_name = g_string_sized_new(256);
 
+    g_autofree uint32_t *parent_indices = calloc(num_folders, sizeof(uint32_t));
+    g_assert(parent_indices);
+
     g_autofree uint8_t *folder_block = calloc(folder_block_size + 1, sizeof(uint8_t));
     g_assert(folder_block);
 
@@ -1010,19 +1016,12 @@ database_file_load_folders(FILE *fp,
                                                                  index_flags,
                                                                  previous_entry_name,
                                                                  &folder,
-                                                                 DATABASE_ENTRY_TYPE_NONE);
+                                                                 DATABASE_ENTRY_TYPE_FOLDER);
 
         // parent_idx: index of parent folder
-        uint32_t parent_idx = 0;
-        fb = copy_bytes_and_return_new_src(&parent_idx, fb, 4);
+        fb = copy_bytes_and_return_new_src(&parent_indices[idx], fb, 4);
 
-        if (parent_idx != idx) {
-            db_entry_set_parent(folder, GINT_TO_POINTER(parent_idx));
-        }
-        else {
-            // parent_idx and idx are the same (i.e. folder is a root index) so it has no parent
-            db_entry_set_parent(folder, NULL);
-        }
+        darray_add_item(folders, folder);
     }
 
     // fail if we didn't read the correct number of bytes
@@ -1035,6 +1034,15 @@ database_file_load_folders(FILE *fp,
     if (idx != num_folders) {
         g_debug("[db_load] failed to read folders (read %d of %d)", idx, num_folders);
         return false;
+    }
+
+    for (uint32_t i = 0; i < num_folders; i++) {
+        FsearchDatabaseEntry *folder = darray_get_item(folders, i);
+        uint32_t parent_idx = parent_indices[i];
+        if (parent_idx != i) {
+            FsearchDatabaseEntry *parent = darray_get_item(folders, parent_idx);
+            db_entry_set_parent(folder, parent);
+        }
     }
 
     return true;
@@ -1065,7 +1073,7 @@ database_file_load_files(FILE *fp,
                                                                  index_flags,
                                                                  previous_entry_name,
                                                                  &entry,
-                                                                 DATABASE_ENTRY_TYPE_NONE);
+                                                                 DATABASE_ENTRY_TYPE_FILE);
 
         // parent_idx: index of parent folder
         uint32_t parent_idx = 0;
@@ -1116,8 +1124,8 @@ static bool
 database_file_load_sorted_arrays(FILE *fp, DynamicArray **sorted_folders, DynamicArray **sorted_files) {
     uint32_t num_sorted_arrays = 0;
 
-    DynamicArray *files = sorted_files[0];
-    DynamicArray *folders = sorted_folders[0];
+    DynamicArray *files = sorted_files[DATABASE_INDEX_PROPERTY_NAME];
+    DynamicArray *folders = sorted_folders[DATABASE_INDEX_PROPERTY_NAME];
 
     if (!database_file_read_element(&num_sorted_arrays, 4, fp)) {
         g_debug("[db_load] failed to load number of sorted arrays");
@@ -1453,7 +1461,7 @@ database_file_save_exclude_pattern(FILE *fp, FsearchDatabaseIndexStore *store, b
     return 0;
 }
 
-static bool
+bool
 database_file_save(FsearchDatabaseIndexStore *store, const char *file_path) {
     g_return_val_if_fail(file_path, false);
     g_return_val_if_fail(store, false);
@@ -1620,7 +1628,7 @@ save_fail:
     return false;
 }
 
-static bool
+bool
 database_file_load(const char *file_path,
                    void (*status_cb)(const char *),
                    FsearchDatabaseIndexStore **store_out,
@@ -1693,11 +1701,6 @@ database_file_load(const char *file_path,
     if (!database_file_load_folders(fp, index_flags, folders, num_folders, folder_block_size)) {
         goto load_fail;
     }
-    for (uint32_t i = 0; i < num_folders; i++) {
-        FsearchDatabaseEntry *folder = darray_get_item(folders, i);
-        uint32_t parent_idx = GPOINTER_TO_INT(db_entry_get_parent(folder));
-        db_entry_set_parent(folder, darray_get_item(folders, parent_idx));
-    }
 
     if (status_cb) {
         status_cb(_("Loading files…"));
@@ -1713,20 +1716,63 @@ database_file_load(const char *file_path,
         goto load_fail;
     }
 
-    // FsearchDatabaseIndexStore *store = fsearch_database_index_store_new(index_flags);
-    //  FsearchDatabaseIndex *index = calloc(1, sizeof(FsearchDatabaseIndex));
-    // g_assert(index);
+    FsearchDatabaseIndexStore *store = g_slice_new0(FsearchDatabaseIndexStore);
+    store->indices = g_ptr_array_new_with_free_func((GDestroyNotify)fsearch_database_index_unref);
+    store->search_results = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, (GDestroyNotify)search_view_free);
+    store->flags = index_flags;
+    store->is_sorted = true;
+    store->running = false;
+    store->ref_count = 1;
 
-    // for (uint32_t i = 0; i < NUM_DATABASE_INDEX_PROPERTIES; i++) {
-    //     index->files[i] = g_steal_pointer(&sorted_files[i]);
-    //     index->folders[i] = g_steal_pointer(&sorted_folders[i]);
-    // }
-    // index->file_pool = g_steal_pointer(&file_pool);
-    // index->folder_pool = g_steal_pointer(&folder_pool);
+    store->include_manager = fsearch_database_include_manager_new();
+    store->exclude_manager = fsearch_database_exclude_manager_new();
 
-    // index->flags = index_flags;
+    store->event_func = NULL;
+    store->event_func_data = NULL;
 
-    //*index_out = index;
+    store->monitor.thread = NULL;
+    store->monitor.loop = NULL;
+    store->monitor.ctx = NULL;
+    store->worker.thread = NULL;
+    store->worker.loop = NULL;
+    store->worker.ctx = NULL;
+
+    for (uint32_t i = 0; i < NUM_DATABASE_INDEX_PROPERTIES; i++) {
+        if (sorted_folders[i]) {
+            store->folder_container[i] = fsearch_database_entries_container_new(sorted_folders[i],
+                                                                                FALSE,
+                                                                                i,
+                                                                                DATABASE_INDEX_PROPERTY_NONE,
+                                                                                DATABASE_ENTRY_TYPE_FOLDER,
+                                                                                NULL);
+            sorted_folders[i] = NULL;
+        }
+        else {
+            store->folder_container[i] = NULL;
+        }
+
+        if (sorted_files[i]) {
+            store->file_container[i] = fsearch_database_entries_container_new(sorted_files[i],
+                                                                              FALSE,
+                                                                              i,
+                                                                              DATABASE_INDEX_PROPERTY_NONE,
+                                                                              DATABASE_ENTRY_TYPE_FILE,
+                                                                              NULL);
+            sorted_files[i] = NULL;
+        }
+        else {
+            store->file_container[i] = NULL;
+        }
+    }
+
+    *store_out = store;
+
+    if (include_manager_out) {
+        *include_manager_out = g_object_ref(store->include_manager);
+    }
+    if (exclude_manager_out) {
+        *exclude_manager_out = g_object_ref(store->exclude_manager);
+    }
 
     g_clear_pointer(&fp, fclose);
 
@@ -2009,6 +2055,7 @@ database_get_exclude_manager(FsearchDatabase *self) {
 
 static FsearchDatabaseIncludeManager *
 database_get_include_manager(FsearchDatabase *self) {
+    g_debug("Getting include manager");
     return self->store ? self->store->include_manager : NULL;
 }
 
@@ -2345,12 +2392,64 @@ database_save(FsearchDatabase *self) {
     g_return_if_fail(self);
     g_return_if_fail(self->file);
 
-    // g_autoptr(GFile) db_directory = g_file_get_parent(self->file);
-    // g_autofree gchar *db_directory_path = g_file_get_path(db_directory);
-
     g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->mutex);
     g_assert_nonnull(locker);
-    // db_file_save(self->store, NULL);
+
+    if (!self->store) {
+        g_debug("[database_save] no store to save");
+        return;
+    }
+
+    g_autofree gchar *file_path = g_file_get_path(self->file);
+    g_return_if_fail(file_path);
+
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GKeyFile) key_file = g_key_file_new();
+
+    g_key_file_set_uint64(key_file, "Database", "version", 1);
+    g_key_file_set_uint64(key_file, "Database", "flags", self->store->flags);
+    g_key_file_set_int64(key_file, "Database", "timestamp", g_get_real_time());
+
+    if (self->store->include_manager) {
+        g_autoptr(GPtrArray) includes = fsearch_database_include_manager_get_includes(self->store->include_manager);
+        g_key_file_set_integer(key_file, "Database", "num_includes", includes->len);
+
+        for (uint32_t i = 0; i < includes->len; ++i) {
+            FsearchDatabaseInclude *include = g_ptr_array_index(includes, i);
+            gchar group_name[64];
+            g_snprintf(group_name, sizeof(group_name), "Include%u", i);
+
+            g_key_file_set_string(key_file, group_name, "path", fsearch_database_include_get_path(include));
+            g_key_file_set_boolean(key_file, group_name, "active", fsearch_database_include_get_active(include));
+            g_key_file_set_boolean(key_file,
+                                   group_name,
+                                   "one_file_system",
+                                   fsearch_database_include_get_one_file_system(include));
+            g_key_file_set_boolean(key_file, group_name, "monitored", fsearch_database_include_get_monitored(include));
+            g_key_file_set_integer(key_file, group_name, "id", fsearch_database_include_get_id(include));
+        }
+    }
+
+    if (self->store->exclude_manager) {
+        g_autoptr(GPtrArray) excludes = fsearch_database_exclude_manager_get_excludes(self->store->exclude_manager);
+        g_key_file_set_integer(key_file, "Database", "num_excludes", excludes->len);
+
+        for (uint32_t i = 0; i < excludes->len; ++i) {
+            FsearchDatabaseExclude *exclude = g_ptr_array_index(excludes, i);
+            gchar group_name[64];
+            g_snprintf(group_name, sizeof(group_name), "Exclude%u", i);
+
+            g_key_file_set_string(key_file, group_name, "path", fsearch_database_exclude_get_path(exclude));
+            g_key_file_set_boolean(key_file, group_name, "active", fsearch_database_exclude_get_active(exclude));
+        }
+    }
+
+    if (!g_key_file_save_to_file(key_file, file_path, &error)) {
+        g_warning("[database_save] failed to save database: %s", error->message);
+    }
+    else {
+        g_debug("[database_save] saved database to %s", file_path);
+    }
 }
 
 static void
@@ -2456,31 +2555,118 @@ database_load(FsearchDatabase *self) {
     g_autofree gchar *file_path = g_file_get_path(self->file);
     g_return_if_fail(file_path);
 
-    g_autoptr(FsearchDatabaseIndexStore) store = NULL;
-    bool res = false;
-    // bool res = db_file_load(file_path, NULL, &store, &include_manager, &exclude_manager);
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GKeyFile) key_file = g_key_file_new();
+
+    if (!g_file_test(file_path, G_FILE_TEST_EXISTS)) {
+        g_debug("[database_load] database file does not exist: %s", file_path);
+        signal_emit(self,
+                   SIGNAL_LOAD_FINISHED,
+                   database_get_info(self),
+                   NULL,
+                   1,
+                   (GDestroyNotify)fsearch_database_info_unref,
+                   NULL);
+        return;
+    }
+
+    if (!g_key_file_load_from_file(key_file, file_path, G_KEY_FILE_NONE, &error)) {
+        g_warning("[database_load] failed to load database: %s", error->message);
+        signal_emit(self,
+                   SIGNAL_LOAD_FINISHED,
+                   database_get_info(self),
+                   NULL,
+                   1,
+                   (GDestroyNotify)fsearch_database_info_unref,
+                   NULL);
+        return;
+    }
+
+    guint64 version = g_key_file_get_uint64(key_file, "Database", "version", NULL);
+    if (version != 1) {
+        g_warning("[database_load] unsupported database version: %lu", version);
+        signal_emit(self,
+                   SIGNAL_LOAD_FINISHED,
+                   database_get_info(self),
+                   NULL,
+                   1,
+                   (GDestroyNotify)fsearch_database_info_unref,
+                   NULL);
+        return;
+    }
+
+    FsearchDatabaseIndexPropertyFlags flags = g_key_file_get_uint64(key_file, "Database", "flags", NULL);
+
+    g_autoptr(FsearchDatabaseIncludeManager) include_manager = fsearch_database_include_manager_new();
+    gint num_includes = g_key_file_get_integer(key_file, "Database", "num_includes", NULL);
+
+    for (gint i = 0; i < num_includes; ++i) {
+        gchar group_name[64];
+        g_snprintf(group_name, sizeof(group_name), "Include%u", i);
+
+        g_autofree gchar *path = g_key_file_get_string(key_file, group_name, "path", NULL);
+        if (!path) {
+            continue;
+        }
+
+        gboolean active = g_key_file_get_boolean(key_file, group_name, "active", NULL);
+        gboolean one_file_system = g_key_file_get_boolean(key_file, group_name, "one_file_system", NULL);
+        gboolean monitored = g_key_file_get_boolean(key_file, group_name, "monitored", NULL);
+        gint id = g_key_file_get_integer(key_file, group_name, "id", NULL);
+
+        FsearchDatabaseInclude *include =
+            fsearch_database_include_new(path, active, one_file_system, monitored, FALSE, id);
+        fsearch_database_include_manager_add(include_manager, include);
+        g_clear_pointer(&include, fsearch_database_include_unref);
+    }
+
+    g_autoptr(FsearchDatabaseExcludeManager) exclude_manager = fsearch_database_exclude_manager_new();
+    gint num_excludes = g_key_file_get_integer(key_file, "Database", "num_excludes", NULL);
+
+    for (gint i = 0; i < num_excludes; ++i) {
+        gchar group_name[64];
+        g_snprintf(group_name, sizeof(group_name), "Exclude%u", i);
+
+        g_autofree gchar *path = g_key_file_get_string(key_file, group_name, "path", NULL);
+        if (!path) {
+            continue;
+        }
+
+        gboolean active = g_key_file_get_boolean(key_file, group_name, "active", NULL);
+
+        FsearchDatabaseExclude *exclude = fsearch_database_exclude_new(path, active);
+        fsearch_database_exclude_manager_add(exclude_manager, exclude);
+        g_clear_pointer(&exclude, fsearch_database_exclude_unref);
+    }
 
     g_autoptr(GMutexLocker) locker = g_mutex_locker_new(&self->mutex);
     g_assert_nonnull(locker);
 
-    if (res) {
-        g_clear_pointer(&self->store, index_store_unref);
-        self->store = g_steal_pointer(&store);
-        // g_set_object(&self->include_manager, include_manager);
-        // g_set_object(&self->exclude_manager, exclude_manager);
-    }
-    else {
-        // g_set_object(&self->include_manager, fsearch_database_include_manager_new_with_defaults());
-        // g_set_object(&self->exclude_manager, fsearch_database_exclude_manager_new_with_defaults());
+    g_autoptr(FsearchDatabaseIndexStore) store = index_store_new(include_manager, exclude_manager, flags, NULL, NULL);
+    if (!store) {
+        g_warning("[database_load] failed to create index store");
+        signal_emit(self,
+                   SIGNAL_LOAD_FINISHED,
+                   database_get_info(self),
+                   NULL,
+                   1,
+                   (GDestroyNotify)fsearch_database_info_unref,
+                   NULL);
+        return;
     }
 
+    g_clear_pointer(&self->store, index_store_unref);
+    self->store = g_steal_pointer(&store);
+
+    g_debug("[database_load] loaded database from %s", file_path);
+
     signal_emit(self,
-                SIGNAL_LOAD_FINISHED,
-                database_get_info(self),
-                NULL,
-                1,
-                (GDestroyNotify)fsearch_database_info_unref,
-                NULL);
+               SIGNAL_LOAD_FINISHED,
+               database_get_info(self),
+               NULL,
+               1,
+               (GDestroyNotify)fsearch_database_info_unref,
+               NULL);
 }
 
 static gpointer
@@ -2603,6 +2789,9 @@ fsearch_database_get_property(GObject *object, guint prop_id, GValue *value, GPa
     case PROP_FILE:
         g_value_set_object(value, self->file);
         break;
+    case PROP_INCLUDE_MANAGER:
+        g_value_set_object(value, fsearch_database_get_include_manager(self));
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
         break;
@@ -2639,6 +2828,12 @@ fsearch_database_class_init(FsearchDatabaseClass *klass) {
                                                 "default",
                                                 G_TYPE_FILE,
                                                 (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+
+    properties[PROP_INCLUDE_MANAGER] = g_param_spec_object("include-manager",
+                                                           "Include Manager",
+                                                           "The include manager for the database",
+                                                           FSEARCH_TYPE_DATABASE_INCLUDE_MANAGER,
+                                                           (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
     g_object_class_install_properties(object_class, NUM_PROPERTIES, properties);
 
@@ -2783,6 +2978,16 @@ fsearch_database_init(FsearchDatabase *self) {
 FsearchDatabase *
 fsearch_database_new(GFile *file) {
     return g_object_new(FSEARCH_TYPE_DATABASE, "file", file, NULL);
+}
+// Public getter for the include manager
+FsearchDatabaseIncludeManager *
+fsearch_database_get_include_manager(FsearchDatabase *self) {
+    g_return_val_if_fail(FSEARCH_IS_DATABASE(self), NULL);
+    if (self->store && self->store->include_manager) {
+        return self->store->include_manager;
+    }
+    // Always return a valid (empty) manager if not present
+    return fsearch_database_include_manager_new();
 }
 // endregion
 

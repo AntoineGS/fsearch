@@ -5,6 +5,10 @@ test_string_utils = executable('test_string_utils', 'test_string_utils.c', depen
 test_time_utils = executable('test_time_utils', 'test_time_utils.c', dependencies: libfsearch_dep)
 test_database_include = executable('test_database_include', 'test_database_include.c', dependencies: libfsearch_dep)
 test_database_exclude = executable('test_database_exclude', 'test_database_exclude.c', dependencies: libfsearch_dep)
+test_database = executable('test_database', 'test_database.c', dependencies: libfsearch_dep)
+test_config_persistence = executable('test_config_persistence', 'test_config_persistence.c', dependencies: libfsearch_dep)
+test_config_save_load = executable('test_config_save_load', 'test_config_save_load.c', dependencies: libfsearch_dep)
+test_database_persistence = executable('test_database_persistence', 'test_database_persistence.c', dependencies: libfsearch_dep)
 
 test('test_database_include',
      test_database_include,
@@ -50,6 +54,34 @@ test('test_string_utils',
 )
 test('test_time_utils',
      test_time_utils,
+     env: [
+       'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
+       'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir()),
+     ],
+)
+test('test_database',
+     test_database,
+     env: [
+       'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
+       'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir()),
+     ],
+)
+test('test_config_persistence',
+     test_config_persistence,
+     env: [
+       'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
+       'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir()),
+     ],
+)
+test('test_config_save_load',
+     test_config_save_load,
+     env: [
+       'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
+       'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir()),
+     ],
+)
+test('test_database_persistence',
+     test_database_persistence,
      env: [
        'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
        'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir()),
